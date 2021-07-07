@@ -1,0 +1,26 @@
+// Scripted Pipeline
+@Library('hcp_pipeline_library') _
+String gitBranch
+
+node("openjdk-11-p") {
+  def result = hmpCheckout()
+  gitBranch = result.GIT_BRANCH
+
+  def globalVars = readGlobalVars()
+  String name = globalVars.name
+  String serviceName = buildServiceName(name, gitBranch)
+
+  String newVersion = buildVersion(globalVars.version)
+  echo "new version: ${newVersion}"
+
+  stage('Build') {
+    hmpBuildMaven()
+    String sourceImage = "nexus.helvetia.group:8084/hcp/helvetia-openjdk-11:22"
+    String targetImage = "${serviceName}:${newVersion}"
+    hmpStartBinaryBuild("binary-${serviceName}", sourceImage, targetImage)
+  }
+
+  stage('Deploy to DEVL') {
+    hmpDeployToStage(commitHash(), getGitUri(), 'devl', gitBranch)
+  }
+}

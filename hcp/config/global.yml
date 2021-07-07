@@ -1,0 +1,6 @@
+---
+name: shutdown-poc
+version: 0.0.1
+base_url: ocp4-prod1.helvetia.io
+application_base: /ch
+docker_release_url: nexus.helvetia.group:8084

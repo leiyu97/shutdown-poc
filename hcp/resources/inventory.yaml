@@ -1,0 +1,228 @@
+kind: Template
+apiVersion: v1
+parameters:
+  - name: SERVICE_NAME
+    required: true
+  - name: BASE_URL
+    required: true
+  - name: APPLICATION_PATH
+    required: true
+  - name: REPLICAS
+    required: true
+  - name: IMAGE
+    required: true
+  - name: PROJECT
+    required: true
+  - name: STAGE
+    required: true
+  - name: QUARKUS_PROFILE
+    required: true
+objects:
+  - kind: DeploymentConfig
+    apiVersion: v1
+    metadata:
+      labels:
+        app: "${SERVICE_NAME}"
+      name: "${SERVICE_NAME}"
+    spec:
+      replicas: "${{REPLICAS}}"
+      selector:
+        app: "${SERVICE_NAME}"
+        deploymentconfig: "${SERVICE_NAME}"
+      strategy:
+        activeDeadlineSeconds: 21600
+        resources: {}
+        rollingParams:
+          intervalSeconds: 1
+          maxSurge: 25%
+          maxUnavailable: 25%
+          timeoutSeconds: 600
+          updatePeriodSeconds: 1
+        type: Rolling
+      template:
+        metadata:
+          labels:
+            app: "${SERVICE_NAME}"
+            deploymentconfig: "${SERVICE_NAME}"
+        spec:
+          containers:
+            - image: "${IMAGE}"
+              env:
+                - name: GC_MAX_METASPACE_SIZE
+                  value: '200'
+                - name: CONTAINER_MAX_MEMORY
+                  value: '524288000'
+                - name: AB_JOLOKIA_OFF
+                  value: "true"
+                - name: TZ
+                  value: "Europe/Zurich"
+                - name: QUARKUS_PROFILE
+                  value: "${QUARKUS_PROFILE}"
+              imagePullPolicy: IfNotPresent
+              livenessProbe:
+                failureThreshold: 3
+                httpGet:
+                  path: /health/live
+                  port: 8080
+                  scheme: HTTP
+                initialDelaySeconds: 25
+                periodSeconds: 10
+                successThreshold: 1
+                timeoutSeconds: 1
+              name: "${SERVICE_NAME}"
+              readinessProbe:
+                failureThreshold: 3
+                httpGet:
+                  path: /health/ready
+                  port: 8080
+                  scheme: HTTP
+                initialDelaySeconds: 25
+                periodSeconds: 10
+                successThreshold: 1
+                timeoutSeconds: 1
+              resources:
+                requests:
+                  cpu: 200m
+                  memory: 200Mi
+                limits:
+                  cpu: 200m
+                  memory: 200Mi
+            - image: "nexus.helvetia.group:8084/hcp/helvetia-nginx-116-runtime:2"
+              imagePullPolicy: IfNotPresent
+              name: "${SERVICE_NAME}-nginx"
+              ports:
+                - containerPort: 8443
+                  protocol: TCP
+              resources:
+                requests:
+                  cpu: 130m
+                  memory: 65Mi
+                limits:
+                  cpu: 200m
+                  memory: 100Mi
+              volumeMounts:
+                - mountPath: /deployments/certs/
+                  name: service-certs
+                  readOnly: true
+                - mountPath: /custom/
+                  name: nginx-config
+                  readOnly: true
+          volumes:
+            - name: service-certs
+              secret:
+                secretName: "${SERVICE_NAME}"
+            - name: nginx-config
+              configMap:
+                defaultMode: 420
+                name: "${SERVICE_NAME}-nginx"
+          dnsPolicy: ClusterFirst
+          restartPolicy: Always
+          schedulerName: default-scheduler
+          securityContext: {}
+          terminationGracePeriodSeconds: 60
+      test: false
+      triggers:
+        - type: ConfigChange
+  - kind: Service
+    apiVersion: v1
+    metadata:
+      labels:
+        app: "${SERVICE_NAME}"
+      name: "${SERVICE_NAME}"
+      annotations:
+        service.alpha.openshift.io/serving-cert-secret-name: "${SERVICE_NAME}"
+    spec:
+      ports:
+        - name: 8443-tcp
+          port: 8443
+          protocol: TCP
+          targetPort: 8443
+      selector:
+        app: "${SERVICE_NAME}"
+        deploymentconfig: "${SERVICE_NAME}"
+      sessionAffinity: None
+      type: ClusterIP
+    status:
+      loadBalancer: {}
+  - kind: Route
+    apiVersion: v1
+    metadata:
+      name: "${SERVICE_NAME}"
+      labels:
+        app: "${SERVICE_NAME}"
+    spec:
+      host: "${PROJECT}-${STAGE}.apps.${BASE_URL}"
+      path: "${APPLICATION_PATH}/"
+      port:
+        targetPort: 8443-tcp
+      tls:
+        insecureEdgeTerminationPolicy: Redirect
+        termination: reencrypt
+      to:
+        kind: Service
+        name: "${SERVICE_NAME}"
+        weight: 100
+      wildcardPolicy: None
+  - kind: ConfigMap
+    apiVersion: v1
+    metadata:
+      name: "${SERVICE_NAME}-nginx"
+      labels:
+        app: "${SERVICE_NAME}"
+    data:
+      nginx.conf: |
+        # For more information on configuration, see:
+        #   * Official English Documentation: http://nginx.org/en/docs/
+
+        # Load dynamic modules. See /opt/rh/rh-nginx116/root/usr/share/doc/README.dynamic.
+        include /opt/rh/rh-nginx116/root/usr/share/nginx/modules/*.conf;
+
+        events {
+            worker_connections  1024;
+        }
+
+        http {
+            log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+            '$status $body_bytes_sent "$http_referer" '
+            '"$http_user_agent" "$http_x_forwarded_for"';
+
+            # access_log /dev/stdout main;
+            # error_log /dev/stderr debug;
+
+            sendfile        on;
+            tcp_nopush      on;
+            tcp_nodelay     on;
+            keepalive_timeout  65;
+            types_hash_max_size 2048;
+
+            include       /etc/opt/rh/rh-nginx116/nginx/mime.types;
+            default_type  application/octet-stream;
+
+            # Load modular configuration files from the /etc/nginx/conf.d directory.
+            # See http://nginx.org/en/docs/ngx_core_module.html#include
+            # for more information.
+            include /opt/app-root/etc/nginx.d/*.conf;
+
+            server {
+                listen       8443 default_server ssl;
+                listen       [::]:8443 default_server ssl;
+                server_name  _;
+                root         /opt/app-root/src;
+                ssl_certificate      /deployments/certs/tls.crt;
+                ssl_certificate_key  /deployments/certs/tls.key;
+
+                # Load configuration files for the default server block.
+                include      /opt/app-root/etc/nginx.default.d/*.conf;
+
+                location ${APPLICATION_PATH}/ {
+                    proxy_pass http://localhost:8080/;
+                }
+
+                # Status endpoint for signalfx nginx monitor
+                location /nginx_status {
+                    stub_status;
+                    access_log off;
+                }
+
+            }
+        }
