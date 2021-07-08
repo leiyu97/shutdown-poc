@@ -16,7 +16,7 @@ public class SleeperResource {
 
         LOG.info("SLEEPER starting");
 
-        Thread.sleep(15_000);
+        Thread.sleep(29_000);
 
         LOG.info("SLEEPER finished");
 
